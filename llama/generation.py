@@ -337,6 +337,8 @@ class Llama:
                 "model only supports 'system', 'user' and 'assistant' roles, "
                 "starting with 'system', then 'user' and alternating (u/a/u/a/u...)"
             )
+            # 配对后，prompt和answer的token数目不一样，如果dialog内有奇数个元素，最后一个会被忽略
+            # 所以后续单独对 -1 的dialog进行处理
             dialog_tokens: List[int] = sum(
                 [
                     self.tokenizer.encode(
