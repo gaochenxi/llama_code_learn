@@ -103,6 +103,7 @@ class Llama:
         assert model_parallel_size == len(
             checkpoints
         ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
+        # 此处仅仅加载一个checkpoint 因为在分布式推理中，每个进程都会加载属于自己的checkpoint
         ckpt_path = checkpoints[get_model_parallel_rank()]
         checkpoint = torch.load(ckpt_path, map_location="cpu")
         with open(Path(ckpt_dir) / "params.json", "r") as f:
@@ -162,8 +163,10 @@ class Llama:
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= params.max_seq_len
+        # 这里的max_seq_len 是模型能够接受的最大长度，包括了prompt和generation的长度 参数说明里的input指的是模型接受的输入，而不是用户的原始输入
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
+        # pad_id 是填充的token id 用于对齐长短不同的prompt
         pad_id = self.tokenizer.pad_id
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
         for k, t in enumerate(prompt_tokens):
@@ -174,6 +177,7 @@ class Llama:
         prev_pos = 0
         eos_reached = torch.tensor([False] * bsz, device="cuda")
         input_text_mask = tokens != pad_id
+        # 如果输入的prompt长度和模型能够接受的最大长度一致，则直接进行推理  
         if min_prompt_len == total_len:
             logits = self.model.forward(tokens, prev_pos)
             token_logprobs = -F.cross_entropy(
@@ -186,7 +190,11 @@ class Llama:
         for cur_pos in range(min_prompt_len, total_len):
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
+                # 第一个 -1 代表只取最后一个token的logits 第二个 -1 代表在最后一个维度上进行softmax 
+                # 对于形状为(batch_size, seq_len, vocab_size) (torch.Size([6, 1, 32000]))的张量，logits[:, -1] 忽略了seq_len维度 变为（torch.Size([6, 32000])），只取最后一个token的logits
+                # dim = -1 代表在最后一个维度上进行softmax 即token维度进行softmax 忽略batch_size维度
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+                # token 类型的结果中存储的是token的id
                 next_token = sample_top_p(probs, top_p)
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
@@ -204,6 +212,7 @@ class Llama:
                     reduction="none",
                     ignore_index=pad_id,
                 )
+            # 生成部分(忽略原始输入的token)如果是eos_id 则标记为True   
             eos_reached |= (~input_text_mask[:, cur_pos]) & (
                 next_token == self.tokenizer.eos_id
             )
