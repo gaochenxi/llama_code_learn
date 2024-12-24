@@ -157,18 +157,20 @@ class Llama:
 
         """
         params = self.model.params
+        print(f"Number of prompts (batch size): {len(prompt_tokens)}")         # Number of prompts (batch size): 4
+        print(f"Individual prompt lengths: {[len(p) for p in prompt_tokens]}") # Individual prompt lengths: [8, 13, 27, 51]
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
-        min_prompt_len = min(len(t) for t in prompt_tokens)
-        max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= params.max_seq_len
+        min_prompt_len = min(len(t) for t in prompt_tokens)                     # 8
+        max_prompt_len = max(len(t) for t in prompt_tokens)                     # 51
+        assert max_prompt_len <= params.max_seq_len                             # 512
         # 这里的max_seq_len 是模型能够接受的最大长度，包括了prompt和generation的长度 参数说明里的input指的是模型接受的输入，而不是用户的原始输入
-        total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
+        total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)       # 64(default) + 51 = 115 
 
         # pad_id 是填充的token id 用于对齐长短不同的prompt
-        pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        pad_id = self.tokenizer.pad_id                                          # -1
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")      # [4, 115]
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
         if logprobs:
@@ -176,7 +178,7 @@ class Llama:
 
         prev_pos = 0
         eos_reached = torch.tensor([False] * bsz, device="cuda")
-        input_text_mask = tokens != pad_id
+        input_text_mask = tokens != pad_id                                          # bool 类型的 [4, 115] prompt值部分为True，pad_id占位部分为False
         # 如果输入的prompt长度和模型能够接受的最大长度一致，则直接进行推理  
         if min_prompt_len == total_len:
             logits = self.model.forward(tokens, prev_pos)
@@ -187,22 +189,24 @@ class Llama:
                 ignore_index=pad_id,
             )
 
+
+        # 循环内注释 以第一次循环为例
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)         # logits.shape [4, 8, 32000]
             if temperature > 0:
                 # 第一个 -1 代表只取最后一个token的logits 第二个 -1 代表在最后一个维度上进行softmax 
-                # 对于形状为(batch_size, seq_len, vocab_size) (torch.Size([6, 1, 32000]))的张量，logits[:, -1] 忽略了seq_len维度 变为（torch.Size([6, 32000])），只取最后一个token的logits
+                # 对于形状为(batch_size, seq_len, vocab_size) (torch.Size([4, 8, 32000]))的张量，logits[:, -1] 取seq_len维度的最后列的值 变为（torch.Size([4, 32000])），即只取最后一个token的logits
                 # dim = -1 代表在最后一个维度上进行softmax 即token维度进行softmax 忽略batch_size维度
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 # token 类型的结果中存储的是token的id
-                next_token = sample_top_p(probs, top_p)
+                next_token = sample_top_p(probs, top_p)                               # next_token shape = [4, 1], [[304], [14675], [278], [13]]
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
-            next_token = next_token.reshape(-1)
+            next_token = next_token.reshape(-1)                                       # [304, 14675, 278, 13]
             # only replace token if prompt has already been generated
             next_token = torch.where(
-                input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
+                input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token           # next_token = [304, 14215, 278, 308]  tokens[:, cur_pos] = [-1, 14215, 278, 308] input_text_mask[:, cur_pos] = [False,  True,  True,  True], False表示Prompt已经结束需要用结果补充
             )
             tokens[:, cur_pos] = next_token
             if logprobs:
@@ -422,11 +426,11 @@ def sample_top_p(probs, p):
         exceeds the threshold p. The distribution is renormalized based on the selected tokens.
 
     """
-    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
-    probs_sum = torch.cumsum(probs_sort, dim=-1)
-    mask = probs_sum - probs_sort > p
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)          # probs_sort.shape = [4, 32000], probs_idx.shape = [4, 32000] idx中存排序后的原始原素idx  
+    probs_sum = torch.cumsum(probs_sort, dim=-1)                                # probs_sort 的累加结果 （例：[1, 2, 3, 4, 5] 经过cumsum 变成 [ 1,  3,  6, 10, 15])
+    mask = probs_sum - probs_sort > p                                           # probs_sum - probs_sort > p 代表某一列前积累的概率超过了p 
     probs_sort[mask] = 0.0
-    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-    next_token = torch.multinomial(probs_sort, num_samples=1)
-    next_token = torch.gather(probs_idx, -1, next_token)
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))                       # 归一化
+    next_token = torch.multinomial(probs_sort, num_samples=1)                   # 从 probs_sort 的概率分布中取出一个元素 并返回对应的下标
+    next_token = torch.gather(probs_idx, -1, next_token)                        # 返回所选元素在原始probs中的下标 next_token.shape = [4, 1]
     return next_token
