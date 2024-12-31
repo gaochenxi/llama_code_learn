@@ -469,9 +469,9 @@ class Transformer(nn.Module):
 
         """
         _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        h = self.tok_embeddings(tokens)                                     # h.shape [4, 8, 4096] 此处4096是隐藏层的维度
+        self.freqs_cis = self.freqs_cis.to(h.device)                        # 计算旋转位置编码用到的参数 shape [1024, 64]
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]          # start_pos = 0, seqlen = 8 shape [8, 64]
 
         mask = None
         if seqlen > 1:
